@@ -1,0 +1,132 @@
+name: Release to SourceForge
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_unix_name:
+        description: SourceForge project UNIX name
+        required: false
+        default: salamis
+      release_dir:
+        description: SourceForge release folder name
+        required: false
+        default: manual
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  linux-packages:
+    name: Build Linux packages
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - name: Configure
+        run: cmake -S . -B build-package -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-package --config Release
+
+      - name: Test
+        run: ctest --test-dir build-package --build-config Release --output-on-failure
+
+      - name: Package
+        run: |
+          mkdir -p dist/linux
+          cpack --config build-package/CPackConfig.cmake -G DEB -B dist/linux
+          cpack --config build-package/CPackConfig.cmake -G RPM -B dist/linux
+          cpack --config build-package/CPackConfig.cmake -G TGZ -B dist/linux
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: salamis-linux-packages
+          path: dist/linux/*
+
+  windows-package:
+    name: Build Windows package
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build-package
+
+      - name: Build
+        run: cmake --build build-package --config Release
+
+      - name: Test
+        run: ctest --test-dir build-package --build-config Release --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/windows | Out-Null
+          cpack --config build-package/CPackConfig.cmake -G ZIP -B dist/windows
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: salamis-windows-package
+          path: dist/windows/*
+
+  publish-sourceforge:
+    name: Publish to SourceForge
+    runs-on: ubuntu-latest
+    needs:
+      - linux-packages
+      - windows-package
+    env:
+      SOURCEFORGE_PROJECT: ${{ inputs.project_unix_name || vars.SOURCEFORGE_PROJECT_UNIX_NAME || 'salamis' }}
+      SOURCEFORGE_RELEASE_DIR: ${{ inputs.release_dir || github.ref_name }}
+      SOURCEFORGE_USERNAME: ${{ secrets.SOURCEFORGE_USERNAME }}
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/sourceforge
+          merge-multiple: true
+
+      - name: Prepare checksums
+        run: |
+          cd dist/sourceforge
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Configure SSH
+        env:
+          SOURCEFORGE_SSH_PRIVATE_KEY: ${{ secrets.SOURCEFORGE_SSH_PRIVATE_KEY }}
+        run: |
+          test -n "$SOURCEFORGE_USERNAME"
+          test -n "$SOURCEFORGE_SSH_PRIVATE_KEY"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SOURCEFORGE_SSH_PRIVATE_KEY" > ~/.ssh/sourceforge
+          chmod 600 ~/.ssh/sourceforge
+          ssh-keyscan -H frs.sourceforge.net >> ~/.ssh/known_hosts
+
+      - name: Validate SourceForge release folder
+        run: |
+          case "$SOURCEFORGE_RELEASE_DIR" in
+            ""|.*|*"&"*|*":"*|*"%"*|*"?"*|*"/"*|*"*"*|*'$'*|*"|"*|*"{"*|*";"*|*"^"*|*"}"*|*"<"*|*">"*|*"\""*|*"'"*)
+              echo "Invalid SourceForge release folder: $SOURCEFORGE_RELEASE_DIR" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Upload to SourceForge FRS
+        run: |
+          sftp -i ~/.ssh/sourceforge -oBatchMode=yes "$SOURCEFORGE_USERNAME@frs.sourceforge.net" <<SFTP
+          cd /home/frs/project/$SOURCEFORGE_PROJECT
+          -mkdir $SOURCEFORGE_RELEASE_DIR
+          cd $SOURCEFORGE_RELEASE_DIR
+          put dist/sourceforge/*
+          SFTP

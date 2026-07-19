@@ -75,6 +75,34 @@ To test from Ubuntu WSL on Windows:
 wsl.exe bash -lc "cd /mnt/c/Work/gitrepo/Salamis && sh scripts/build-linux-packages.sh build-wsl-package"
 ```
 
+## SourceForge Releases
+
+GitHub Actions can build release artifacts and upload them directly to SourceForge's File Release System.
+
+Configure these GitHub repository secrets:
+
+- `SOURCEFORGE_USERNAME`: SourceForge login username with project release permissions
+- `SOURCEFORGE_SSH_PRIVATE_KEY`: private SSH key for that SourceForge account
+
+Optionally configure this repository variable:
+
+- `SOURCEFORGE_PROJECT_UNIX_NAME`: SourceForge project UNIX name, defaults to `salamis`
+
+The release workflow runs automatically for tags matching `v*`, or manually from GitHub Actions:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Artifacts are uploaded to:
+
+```text
+frs.sourceforge.net:/home/frs/project/<project-unix-name>/<release-folder>/
+```
+
+The workflow publishes Debian, RPM, generic Linux archive, Windows ZIP, and `SHA256SUMS.txt` files.
+
 ## Build on Windows
 
 PowerShell with Visual Studio, Ninja, MinGW, or another CMake-supported C++17 compiler works:
