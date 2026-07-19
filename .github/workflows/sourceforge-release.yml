@@ -47,7 +47,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: salamis-linux-packages
-          path: dist/linux/*
+          path: |
+            dist/linux/*.deb
+            dist/linux/*.rpm
+            dist/linux/*.tar.gz
 
   windows-package:
     name: Build Windows package
@@ -76,7 +79,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: salamis-windows-package
-          path: dist/windows/*
+          path: dist/windows/*.zip
 
   publish-sourceforge:
     name: Publish to SourceForge
@@ -99,7 +102,7 @@ jobs:
       - name: Prepare checksums
         run: |
           cd dist/sourceforge
-          sha256sum * > SHA256SUMS.txt
+          find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
 
       - name: Configure SSH
         env:
@@ -124,9 +127,14 @@ jobs:
 
       - name: Upload to SourceForge FRS
         run: |
+          find dist/sourceforge -maxdepth 1 -type f -print
           sftp -i ~/.ssh/sourceforge -oBatchMode=yes "$SOURCEFORGE_USERNAME@frs.sourceforge.net" <<SFTP
           cd /home/frs/project/$SOURCEFORGE_PROJECT
           -mkdir $SOURCEFORGE_RELEASE_DIR
           cd $SOURCEFORGE_RELEASE_DIR
-          put dist/sourceforge/*
+          mput dist/sourceforge/*.deb
+          mput dist/sourceforge/*.rpm
+          mput dist/sourceforge/*.tar.gz
+          mput dist/sourceforge/*.zip
+          put dist/sourceforge/SHA256SUMS.txt
           SFTP
