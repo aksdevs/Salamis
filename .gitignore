@@ -1,0 +1,8 @@
+build/
+build-*/
+data/
+*.svdb
+*.svdb.tmp
+*.deb
+*.rpm
+*.tar.gz
