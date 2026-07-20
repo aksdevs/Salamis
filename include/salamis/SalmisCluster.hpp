@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,19 @@ struct NodeConfig {
     std::filesystem::path store_path;
 };
 
+struct NodeHealth {
+    std::string id;
+    bool reachable = false;
+};
+
+struct LeaderElectionResult {
+    std::optional<NodeConfig> leader;
+    std::size_t reachable_nodes = 0;
+    std::size_t total_nodes = 0;
+
+    [[nodiscard]] bool has_quorum() const noexcept;
+};
+
 class ClusterConfig {
 public:
     static ClusterConfig load(const std::filesystem::path& path);
@@ -26,6 +40,7 @@ public:
     [[nodiscard]] const NodeConfig& node_by_id(const std::string& id) const;
     [[nodiscard]] const NodeConfig& owner_for_id(const std::string& vector_id) const;
     [[nodiscard]] std::uint64_t shard_for_id(const std::string& vector_id) const;
+    [[nodiscard]] LeaderElectionResult elect_leader(const std::vector<NodeHealth>& health) const;
 
 private:
     [[nodiscard]] static std::uint64_t stable_hash(const std::string& value) noexcept;

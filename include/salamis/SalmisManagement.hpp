@@ -5,6 +5,7 @@
 #include "salamis/SalmisCluster.hpp"
 
 #include <string>
+#include <vector>
 
 namespace salamis {
 
@@ -15,8 +16,11 @@ public:
     [[nodiscard]] std::string nodes_report() const;
     [[nodiscard]] std::string owner_report(const std::string& vector_id) const;
     [[nodiscard]] std::string health_report() const;
+    [[nodiscard]] std::string leader_report() const;
 
 private:
+    [[nodiscard]] std::vector<NodeHealth> probe_health() const;
+
     ClusterConfig config_;
 };
 

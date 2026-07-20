@@ -52,6 +52,10 @@ void require_ok(const std::string& response) {
 
 } // namespace
 
+bool LeaderElectionResult::has_quorum() const noexcept {
+    return reachable_nodes > total_nodes / 2;
+}
+
 ClusterConfig ClusterConfig::load(const std::filesystem::path& path) {
     std::ifstream stream(path);
     if (!stream) {
@@ -120,6 +124,31 @@ std::uint64_t ClusterConfig::stable_hash(const std::string& value) noexcept {
         hash *= 1099511628211ULL;
     }
     return hash;
+}
+
+LeaderElectionResult ClusterConfig::elect_leader(const std::vector<NodeHealth>& health) const {
+    LeaderElectionResult result;
+    result.total_nodes = nodes_.size();
+
+    std::unordered_set<std::string> reachable;
+    for (const auto& node : health) {
+        if (node.reachable) {
+            reachable.insert(node.id);
+        }
+    }
+    result.reachable_nodes = reachable.size();
+
+    if (!result.has_quorum()) {
+        return result;
+    }
+
+    for (const auto& node : nodes_) {
+        if (reachable.find(node.id) != reachable.end()) {
+            result.leader = node;
+            return result;
+        }
+    }
+    return result;
 }
 
 DistributedVectorDatabase::DistributedVectorDatabase(ClusterConfig config)

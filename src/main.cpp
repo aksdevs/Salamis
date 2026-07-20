@@ -32,6 +32,7 @@ void print_usage() {
               << "  salamis_cli manage <cluster.conf> nodes\n"
               << "  salamis_cli manage <cluster.conf> owner <id>\n"
               << "  salamis_cli manage <cluster.conf> health\n"
+              << "  salamis_cli manage <cluster.conf> leader\n"
               << "  salamis_cli web <cluster.conf> <host> <port>\n"
               << "  salamis_cli gui <cluster.conf> <host> <port>\n";
 }
@@ -121,6 +122,10 @@ int main(int argc, char* argv[]) {
             }
             if (command == "health") {
                 std::cout << manager.health_report();
+                return 0;
+            }
+            if (command == "leader") {
+                std::cout << manager.leader_report();
                 return 0;
             }
             print_usage();

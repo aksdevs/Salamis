@@ -17,6 +17,10 @@ Salamis is licensed under the GNU General Public License version 3.0 only. See [
 - Minimal CLI and unit tests
 - User and admin web consoles for distributed deployments
 - Management CLI for node inventory, shard ownership, and health checks
+- Cached vector norms and shared read locks for lower-latency exact search
+- Configurable durability for flush-on-write or manual bulk-ingest flushes
+- Deterministic leader election with quorum checks
+- Node protocol commands for `PING`, `STATS`, `PUT`, `GET`, `SEARCH`, and `DELETE`
 
 ## Modules
 
@@ -188,7 +192,18 @@ On Windows, use the generated `.exe` path for the same commands.
 
 To grow beyond three nodes, add more lines with unique node ids and ports. Salamis will route writes across all configured nodes. Changing the node count changes shard ownership for existing ids; a production deployment would add online rebalancing before resizing a live cluster.
 
-The current distributed implementation is intentionally simple: deterministic hash sharding, one TCP request per connection, exact local search, and fan-out query merge. A production cluster would add replication, membership changes with rebalancing, request timeouts, authentication, and a binary protocol.
+## Production Features
+
+The runtime now includes several production-oriented behaviors:
+
+- Search latency: cosine searches cache each stored vector's norm at ingest/load time, so queries do not recompute norms for every record.
+- Concurrent reads: local database reads and searches use shared locks, while mutations use exclusive locks.
+- Bulk ingest: library users can select `DurabilityMode::ManualFlush` and call `upsert_many(...)` followed by `flush()` to avoid a disk rewrite per vector.
+- Stable sharding: cluster ownership uses deterministic FNV-1a hashing instead of implementation-dependent `std::hash`.
+- Leader election: the cluster elects the lowest sorted healthy node id when a majority quorum is reachable. If quorum is unavailable, no leader is elected.
+- Node operations: the TCP runtime supports `PING` for liveness and `STATS` for local vector count, dimensions, and pending writes.
+
+This is still not a full consensus system. For strict production consensus, the next step would be a Raft-style replicated metadata log for membership changes, leases, and failover.
 
 ## Web Consoles
 
@@ -244,6 +259,8 @@ The test suite covers:
 - TCP protocol command handling
 - User/admin web console routes and API payload validation
 - Management CLI report formatting and node health protocol
+- Manual flush durability and batch upsert
+- Leader election with and without quorum
 
 ## Management CLI
 
@@ -253,6 +270,7 @@ Use the management commands from Linux shells, Windows PowerShell, or Command Pr
 ./build/salamis_cli manage ./examples/cluster-3-node.conf nodes
 ./build/salamis_cli manage ./examples/cluster-3-node.conf owner doc-1
 ./build/salamis_cli manage ./examples/cluster-3-node.conf health
+./build/salamis_cli manage ./examples/cluster-3-node.conf leader
 ```
 
 Windows example:
@@ -261,9 +279,11 @@ Windows example:
 .\build\salamis_cli.exe manage .\examples\cluster.conf nodes
 .\build\salamis_cli.exe manage .\examples\cluster.conf owner doc-1
 .\build\salamis_cli.exe manage .\examples\cluster.conf health
+.\build\salamis_cli.exe manage .\examples\cluster.conf leader
 ```
 
-`health` sends `PING` to each configured shard node and reports `up`, `degraded`, or `down`.
+`health` sends `PING` to each configured shard node and reports `up` or `down`.
+`leader` probes node health and reports the elected leader only when quorum is available.
 
 ## File Format
 

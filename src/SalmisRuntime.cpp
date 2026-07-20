@@ -225,6 +225,13 @@ std::string TcpVectorServer::handle_request(const std::string& line) {
         return "PONG";
     }
 
+    if (command == "STATS") {
+        const auto stats = database_.stats();
+        std::ostringstream response;
+        response << "STATS " << stats.vectors << ' ' << stats.dimensions << ' ' << stats.pending_writes;
+        return response.str();
+    }
+
     if (command == "DELETE") {
         std::string id;
         stream >> id;

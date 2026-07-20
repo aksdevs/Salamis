@@ -101,6 +101,34 @@ void upsert_replaces_existing_record_on_disk() {
     assert(reopened.search({0.0F, 1.0F}, 1).front().id == "same");
 }
 
+void supports_manual_flush_for_bulk_ingest() {
+    const auto path = test_path("salamis_manual_flush_tests.svdb");
+    salamis::VectorDatabase db(path, salamis::Metric::Cosine, salamis::DurabilityMode::ManualFlush);
+    db.upsert("one", {1.0F, 0.0F});
+    db.upsert("two", {0.0F, 1.0F});
+    assert(db.stats().pending_writes == 2);
+
+    salamis::VectorDatabase before_flush(path);
+    assert(before_flush.size() == 0);
+
+    db.flush();
+    assert(db.stats().pending_writes == 0);
+    salamis::VectorDatabase after_flush(path);
+    assert(after_flush.size() == 2);
+}
+
+void supports_batch_upsert() {
+    const auto path = test_path("salamis_batch_upsert_tests.svdb");
+    salamis::VectorDatabase db(path);
+    db.upsert_many({
+        salamis::VectorRecord{"one", {1.0F, 0.0F}},
+        salamis::VectorRecord{"two", {0.0F, 1.0F}},
+        salamis::VectorRecord{"three", {0.5F, 0.5F}},
+    });
+    assert(db.size() == 3);
+    assert(db.search({1.0F, 0.0F}, 1).front().id == "one");
+}
+
 void rejects_empty_and_non_finite_vectors() {
     const auto path = test_path("salamis_validation_tests.svdb");
     salamis::VectorDatabase db(path);
@@ -208,6 +236,47 @@ void rejects_invalid_cluster_config() {
     std::filesystem::remove(duplicate_path);
 }
 
+void elects_leader_when_quorum_is_available() {
+    const auto path = test_path("salamis_leader_cluster.conf");
+    {
+        std::ofstream stream(path);
+        stream << "node-a 127.0.0.1 7101 node-a.svdb\n";
+        stream << "node-b 127.0.0.1 7102 node-b.svdb\n";
+        stream << "node-c 127.0.0.1 7103 node-c.svdb\n";
+    }
+
+    const auto config = salamis::ClusterConfig::load(path);
+    const auto elected = config.elect_leader({
+        salamis::NodeHealth{"node-a", false},
+        salamis::NodeHealth{"node-b", true},
+        salamis::NodeHealth{"node-c", true},
+    });
+    assert(elected.has_quorum());
+    assert(elected.leader.has_value());
+    assert(elected.leader->id == "node-b");
+    std::filesystem::remove(path);
+}
+
+void refuses_leader_without_quorum() {
+    const auto path = test_path("salamis_no_quorum_cluster.conf");
+    {
+        std::ofstream stream(path);
+        stream << "node-a 127.0.0.1 7101 node-a.svdb\n";
+        stream << "node-b 127.0.0.1 7102 node-b.svdb\n";
+        stream << "node-c 127.0.0.1 7103 node-c.svdb\n";
+    }
+
+    const auto config = salamis::ClusterConfig::load(path);
+    const auto elected = config.elect_leader({
+        salamis::NodeHealth{"node-a", true},
+        salamis::NodeHealth{"node-b", false},
+        salamis::NodeHealth{"node-c", false},
+    });
+    assert(!elected.has_quorum());
+    assert(!elected.leader.has_value());
+    std::filesystem::remove(path);
+}
+
 void handles_tcp_protocol_commands() {
     const auto path = test_path("salamis_protocol_tests.svdb");
     salamis::VectorDatabase db(path);
@@ -215,6 +284,7 @@ void handles_tcp_protocol_commands() {
 
     assert(server.handle_request("PUT doc-1 1 0 0") == "OK");
     assert(server.handle_request("PING") == "PONG");
+    assert(server.handle_request("STATS") == "STATS 1 3 0");
     assert(server.handle_request("GET doc-1").rfind("VECTOR doc-1", 0) == 0);
     assert(server.handle_request("SEARCH 1 1 0 0").find("doc-1") != std::string::npos);
     assert(server.handle_request("DELETE doc-1") == "OK");
@@ -288,11 +358,15 @@ int main() {
     deletes_records();
     supports_l2_and_dot_metrics();
     upsert_replaces_existing_record_on_disk();
+    supports_manual_flush_for_bulk_ingest();
+    supports_batch_upsert();
     rejects_empty_and_non_finite_vectors();
     loads_cluster_config_and_selects_owner();
     supports_variable_cluster_sizes();
     preserves_single_node_ownership();
     rejects_invalid_cluster_config();
+    elects_leader_when_quorum_is_available();
+    refuses_leader_without_quorum();
     handles_tcp_protocol_commands();
     formats_management_reports();
     serves_web_console_surfaces();

@@ -6,6 +6,8 @@
 #include <cmath>
 #include <fstream>
 #include <limits>
+#include <mutex>
+#include <shared_mutex>
 
 namespace salamis {
 namespace {
@@ -149,12 +151,13 @@ const std::filesystem::path& DiskVectorStore::path() const noexcept {
     return path_;
 }
 
-VectorDatabase::VectorDatabase(std::filesystem::path storage_path, Metric metric)
-    : store_(std::move(storage_path)), metric_(metric) {
+VectorDatabase::VectorDatabase(std::filesystem::path storage_path, Metric metric, DurabilityMode durability)
+    : store_(std::move(storage_path)), metric_(metric), durability_(durability) {
     load_from_disk();
 }
 
 void VectorDatabase::upsert(std::string id, std::vector<float> values) {
+    std::unique_lock lock(mutex_);
     if (id.empty()) {
         throw VectorDatabaseError("vector id cannot be empty");
     }
@@ -162,39 +165,64 @@ void VectorDatabase::upsert(std::string id, std::vector<float> values) {
     if (dimensions_ == 0) {
         dimensions_ = values.size();
     }
-    vectors_[std::move(id)] = std::move(values);
-    flush();
+    const auto norm = magnitude(values);
+    vectors_[std::move(id)] = StoredVector{std::move(values), norm};
+    mark_dirty();
+}
+
+void VectorDatabase::upsert_many(std::vector<VectorRecord> records) {
+    std::unique_lock lock(mutex_);
+    for (auto& record : records) {
+        if (record.id.empty()) {
+            throw VectorDatabaseError("vector id cannot be empty");
+        }
+        validate_vector(record.values);
+        if (dimensions_ == 0) {
+            dimensions_ = record.values.size();
+        }
+        const auto norm = magnitude(record.values);
+        vectors_[std::move(record.id)] = StoredVector{std::move(record.values), norm};
+        ++pending_writes_;
+    }
+    if (durability_ == DurabilityMode::FlushOnWrite && pending_writes_ > 0) {
+        store_.save(records_in_stable_order());
+        pending_writes_ = 0;
+    }
 }
 
 bool VectorDatabase::erase(const std::string& id) {
+    std::unique_lock lock(mutex_);
     const auto erased = vectors_.erase(id) > 0;
     if (erased) {
         if (vectors_.empty()) {
             dimensions_ = 0;
         }
-        flush();
+        mark_dirty();
     }
     return erased;
 }
 
 std::optional<VectorRecord> VectorDatabase::get(const std::string& id) const {
+    std::shared_lock lock(mutex_);
     const auto found = vectors_.find(id);
     if (found == vectors_.end()) {
         return std::nullopt;
     }
-    return VectorRecord{found->first, found->second};
+    return VectorRecord{found->first, found->second.values};
 }
 
 std::vector<SearchResult> VectorDatabase::search(const std::vector<float>& query, std::size_t limit) const {
+    std::shared_lock lock(mutex_);
     if (limit == 0 || vectors_.empty()) {
         return {};
     }
     validate_vector(query);
+    const auto query_norm = magnitude(query);
 
     std::vector<SearchResult> results;
     results.reserve(vectors_.size());
     for (const auto& [id, values] : vectors_) {
-        results.push_back(SearchResult{id, score(query, values)});
+        results.push_back(SearchResult{id, score(query, query_norm, values)});
     }
 
     const auto result_count = std::min(limit, results.size());
@@ -213,18 +241,28 @@ std::vector<SearchResult> VectorDatabase::search(const std::vector<float>& query
 }
 
 std::size_t VectorDatabase::size() const noexcept {
+    std::shared_lock lock(mutex_);
     return vectors_.size();
 }
 
 std::size_t VectorDatabase::dimensions() const noexcept {
+    std::shared_lock lock(mutex_);
     return dimensions_;
 }
 
+DatabaseStats VectorDatabase::stats() const noexcept {
+    std::shared_lock lock(mutex_);
+    return DatabaseStats{vectors_.size(), dimensions_, pending_writes_};
+}
+
 void VectorDatabase::flush() const {
+    std::unique_lock lock(mutex_);
     store_.save(records_in_stable_order());
+    pending_writes_ = 0;
 }
 
 void VectorDatabase::load_from_disk() {
+    std::unique_lock lock(mutex_);
     for (auto record : store_.load()) {
         if (record.id.empty()) {
             throw VectorDatabaseError("stored vector id cannot be empty");
@@ -233,7 +271,8 @@ void VectorDatabase::load_from_disk() {
         if (dimensions_ == 0) {
             dimensions_ = record.values.size();
         }
-        vectors_[std::move(record.id)] = std::move(record.values);
+        const auto norm = magnitude(record.values);
+        vectors_[std::move(record.id)] = StoredVector{std::move(record.values), norm};
     }
 }
 
@@ -251,25 +290,25 @@ void VectorDatabase::validate_vector(const std::vector<float>& values) const {
     }
 }
 
-float VectorDatabase::score(const std::vector<float>& lhs, const std::vector<float>& rhs) const {
+float VectorDatabase::score(const std::vector<float>& lhs, float lhs_norm, const StoredVector& rhs) const {
     switch (metric_) {
     case Metric::Cosine: {
-        const auto denominator = magnitude(lhs) * magnitude(rhs);
+        const auto denominator = lhs_norm * rhs.norm;
         if (denominator == 0.0F) {
             return -std::numeric_limits<float>::infinity();
         }
-        return dot_product(lhs, rhs) / denominator;
+        return dot_product(lhs, rhs.values) / denominator;
     }
     case Metric::L2: {
         float distance = 0.0F;
         for (std::size_t i = 0; i < lhs.size(); ++i) {
-            const auto delta = lhs[i] - rhs[i];
+            const auto delta = lhs[i] - rhs.values[i];
             distance += delta * delta;
         }
         return -std::sqrt(distance);
     }
     case Metric::Dot:
-        return dot_product(lhs, rhs);
+        return dot_product(lhs, rhs.values);
     }
     return -std::numeric_limits<float>::infinity();
 }
@@ -278,12 +317,20 @@ std::vector<VectorRecord> VectorDatabase::records_in_stable_order() const {
     std::vector<VectorRecord> records;
     records.reserve(vectors_.size());
     for (const auto& [id, values] : vectors_) {
-        records.push_back(VectorRecord{id, values});
+        records.push_back(VectorRecord{id, values.values});
     }
     std::sort(records.begin(), records.end(), [](const VectorRecord& lhs, const VectorRecord& rhs) {
         return lhs.id < rhs.id;
     });
     return records;
+}
+
+void VectorDatabase::mark_dirty() {
+    ++pending_writes_;
+    if (durability_ == DurabilityMode::FlushOnWrite) {
+        store_.save(records_in_stable_order());
+        pending_writes_ = 0;
+    }
 }
 
 } // namespace salamis
